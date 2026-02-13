@@ -335,7 +335,7 @@ def make_complete_pdf(
 if __name__ == "__main__":
     # Repo-friendly paths
     excel_file = "data/input/country_eaa_weighted_recommendations_and_coverage_with_total.xlsx"
-    ssr_file = "data/input/SSR_IDR_SSRcapped_output.xlsx"
+    ssr_file = "data/input/SSRcapped_output.xlsx"
     shapefile = "data/shapefile/ne_50m_admin_0_countries.shp"
 
     output_file = "results/Figure2_Complete_Squares.pdf"
