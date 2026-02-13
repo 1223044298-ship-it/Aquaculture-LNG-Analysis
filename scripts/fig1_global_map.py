@@ -1,12 +1,14 @@
 # ============================================================
-# AUTO (FULL) version with PDF Export:
-# - Coastline suitability (blue/red) derived from .nc SST
-# - Mean suitable latitude (dashed) = mean latitude of points on blue/red masks
+# Fig1 (FINAL):
+# - Coastline suitability (baseline=blue, cooling-added=red) from SST .nc
+# - Mean suitable latitude (dashed) computed from BLUE/RED mask points
 # - Yellow site marker sizes & size legend labels are DATA-DRIVEN from SIZE_COL
-# - Adds per-panel text for Through / Flux-full / Weak-wall areas (area_data)
-# - SAVES BOTH .PNG AND .PDF FILES
+# - Filters sites by cultivable == True
+# - Exports: PNG + PDF + mean-lat table + zoom panels
+# - NO area_data; NO override blocks
 # ============================================================
 
+import os
 import pandas as pd
 import numpy as np
 import xarray as xr
@@ -17,7 +19,6 @@ from shapely.ops import linemerge
 import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 from cartopy.io import shapereader as shpreader
-
 
 # ===================== USER SETTINGS =====================
 
@@ -30,20 +31,27 @@ SPECIES_TEMP_XLS = "species_temp_ranges.xlsx"
 SITES_XLS        = "site_species_cover10_needcool_coast20km_with_area.xlsx"
 SITES_SHEET      = "Sites_Coast20km"
 
+# columns in SITES_XLS
 LON_COL     = "src_lon_deg"
 LAT_COL     = "src_lat_deg"
 SPECIES_COL = "species"
+CULTIVABLE_COL = "cultivable"
 
-# ===== 站点大小对应的面积列（你之前是 flux-full）=====
-SIZE_COL    = "area_weakwall_km2"
+# ===== choose ONE area column for marker size =====
+# options:
+#   "area_Open_Flow_km2"
+#   "area_Dense_Array_km2"
+#   "area_Semi_Enclosed_km2"
+SIZE_COL    = "area_Semi_Enclosed_km2"
+AREA_UNIT   = "km²"
 
-# 阈值（按月）
+# thresholds (months)
 BASELINE_THR_MONTHS = 9
 ADDED_THR_MONTHS    = 9
 
 DELTA_T = 4.0  # cooling -4C
 
-# 近岸采样偏移（用于近岸 50km 判定）
+# nearshore sampling offsets
 NEARSHORE_OFFSETS = [
     (0.0, 0.0),
     (0.5, 0.0),
@@ -52,12 +60,12 @@ NEARSHORE_OFFSETS = [
     (0.0, -0.5),
 ]
 
-# 海岸线 densify/平滑参数
+# coastline densify/smooth
 MAX_GAP_POINTS   = 8
 MIN_SEG_LEN_DEG  = 0.7
 DENSIFY_STEP_DEG = 0.15
 
-# 输出图参数
+# output figure
 DPI = 600
 GRID_FIGSIZE = (11, 16)
 FIGSIZE_SINGLE = (10, 12)
@@ -66,7 +74,7 @@ USE_FIXED_EXTENT = True
 MAP_LON_MIN, MAP_LON_MAX = -130, 150
 MAP_LAT_MIN, MAP_LAT_MAX = -80, 80
 
-# 颜色
+# colors
 COAST_BASELINE_COLOR = "#1f77b4"
 COAST_ADDED_COLOR    = "#d62728"
 COAST_OTHER_COLOR    = "lightgray"
@@ -74,49 +82,19 @@ COAST_OTHER_COLOR    = "lightgray"
 SITE_OTHER_COLOR     = "0.35"
 SITE_FOCAL_FACE      = "#FFD92F"
 
-# 平均纬度线颜色（虚线）
 MEAN_BASELINE_COLOR  = "#9bbf8a"
 MEAN_ADDED_COLOR     = "#f79059"
 
-# 放大图黄点放大倍数
 ZOOM_SIZE_SCALE_FACTOR = 100.0
 
-# 放大框
 SPECIES_ZOOM_BBOXES = {
-    'salmon':    [(-13.0, 10.0, 32.0, 53.0)],
-    'cod':       [(-13.0, 10.0, 47.0, 57.0)],
-    'grouper':   [(100.0, 113.0, -12.0, -2.0)],
-    'barramundi':[(100.0, 113.0, -12.0, -1.0)],
-    'seabass':   [(110.0, 125.0, 18.0, 30.0)],
-    'seabream':  [(110.0, 135.0, 18.0, 40.0)],
+    "salmon":     [(-13.0, 10.0, 32.0, 53.0)],
+    "cod":        [(-13.0, 10.0, 47.0, 57.0)],
+    "grouper":    [(100.0, 113.0, -12.0, -2.0)],
+    "barramundi": [(100.0, 113.0, -12.0, -1.0)],
+    "seabass":    [(110.0, 125.0, 18.0, 30.0)],
+    "seabream":   [(110.0, 135.0, 18.0, 40.0)],
 }
-
-# ========= 情景面积显示（用于子图角标文字）=========
-area_unit = "km²"
-
-area_data = {
-    "Brm": {"through": 7.07,  "flux_full": 21.22, "weakwall": 42.44},
-    "Cod": {"through": 4.76,  "flux_full": 14.28, "weakwall": 28.55},
-    "Grp": {"through": 14.43, "flux_full": 43.30, "weakwall": 86.60},
-    "Pmp": {"through": 7.07,  "flux_full": 21.22, "weakwall": 42.44},
-    "Slm": {"through": 9.35,  "flux_full": 28.06, "weakwall": 56.11},
-    "Sbs": {"through": 16.60, "flux_full": 49.80, "weakwall": 99.61},
-    "Sbm": {"through": 16.87, "flux_full": 50.61, "weakwall": 101.22},
-    "Tlp": {"through": 6.44,  "flux_full": 19.32, "weakwall": 38.64},
-}
-
-# 物种名称映射（用于 area_data）
-species_code_map = {
-    "barramundi": "Brm",
-    "cod": "Cod",
-    "grouper": "Grp",
-    "pompano": "Pmp",
-    "salmon": "Slm",
-    "seabass": "Sbs",
-    "seabream": "Sbm",
-    "tilapia": "Tlp",
-}
-
 
 # ===================== HELPERS =====================
 
@@ -126,18 +104,18 @@ def densify_line(line, max_step_deg=DENSIFY_STEP_DEG):
     pts = [line.interpolate(float(i) / n, normalized=True) for i in range(n + 1)]
     return pts
 
-def sample_sst_points(lons, lats, sst_da, lon_name="longitude", lat_name="latitude"):
+def sample_sst_points(lons, lats, sst_da, lon_name=LON_NAME, lat_name=LAT_NAME):
     lons = np.asarray(lons)
     lats = np.asarray(lats)
-    da = sst_da
-    data_lons = da[lon_name]
+    data_lons = sst_da[lon_name]
 
+    # handle 0..360 longitude datasets
     if float(data_lons.max()) > 180:
         lons_sample = (lons + 360) % 360
     else:
         lons_sample = lons
 
-    out = da.interp({
+    out = sst_da.interp({
         lon_name: ("points", lons_sample),
         lat_name: ("points", lats),
     })
@@ -185,7 +163,6 @@ def mask_to_segments(xs, ys, mask):
 def merge_and_filter_segments(segments, min_len_deg=MIN_SEG_LEN_DEG):
     if not segments:
         return []
-
     multi = MultiLineString(segments)
     merged_geom = linemerge(multi)
 
@@ -200,14 +177,12 @@ def merge_and_filter_segments(segments, min_len_deg=MIN_SEG_LEN_DEG):
     elif isinstance(merged_geom, GeometryCollection):
         for g in merged_geom.geoms:
             if isinstance(g, (LineString, MultiLineString)):
-                if isinstance(g, LineString):
-                    if g.length >= min_len_deg:
-                        result.append(g)
+                if isinstance(g, LineString) and g.length >= min_len_deg:
+                    result.append(g)
                 elif isinstance(g, MultiLineString):
                     for g2 in g.geoms:
                         if g2.length >= min_len_deg:
                             result.append(g2)
-
     return result
 
 def plot_lines_from_geom(ax, geom, **kwargs):
@@ -242,9 +217,8 @@ def coastal_nearshore_masks(xs, ys, theta_da, Tmin, Tmax,
                             baseline_thr=BASELINE_THR_MONTHS,
                             added_thr=ADDED_THR_MONTHS):
     """
-    返回:
-      baseline_ok: 基线月数 >= baseline_thr
-      added_ok: baseline 月数 < baseline_thr 且 (baseline∪cool) 月数 >= added_thr
+    baseline_ok: months_baseline >= baseline_thr
+    added_ok: months_baseline < baseline_thr AND months_union(baseline OR cooled) >= added_thr
     """
     xs = np.asarray(xs)
     ys = np.asarray(ys)
@@ -298,12 +272,6 @@ def coastal_nearshore_masks(xs, ys, theta_da, Tmin, Tmax,
     return baseline_ok, added_ok
 
 def hemi_mean_lat(lat_list):
-    """
-    输入：海岸点纬度（带符号）
-    输出：(north_mean, south_abs_mean)
-      north_mean: 正值（°N）
-      south_abs_mean: 南半球取绝对值（例如 32 表示 32°S）
-    """
     if not lat_list:
         return (None, None)
     arr = np.asarray(lat_list, dtype=float)
@@ -322,8 +290,11 @@ def hemi_mean_lat(lat_list):
 df_temp = pd.read_excel(SPECIES_TEMP_XLS)
 
 df_sites_all = pd.read_excel(SITES_XLS, sheet_name=SITES_SHEET)
-if "cultivable" in df_sites_all.columns:
-    df_sites_all = df_sites_all[df_sites_all["cultivable"] == True].copy()
+
+# cultivable filter (required by you)
+if CULTIVABLE_COL in df_sites_all.columns:
+    df_sites_all = df_sites_all[df_sites_all[CULTIVABLE_COL] == True].copy()
+
 df_sites_all["_species_lc"] = df_sites_all[SPECIES_COL].astype(str).str.lower()
 
 ds = xr.open_dataset(SST_PATH)
@@ -332,16 +303,16 @@ theta10 = theta.isel(depth=0) if "depth" in theta.dims else theta
 if "depth" in theta10.dims and theta10.sizes.get("depth", 1) == 1:
     theta10 = theta10.isel(depth=0)
 
-# coast/land/countries
-coast_shp = shpreader.natural_earth(resolution="110m", category="physical", name="coastline")
-land_shp  = shpreader.natural_earth(resolution="110m", category="physical", name="land")
-country_shp = shpreader.natural_earth(resolution="110m", category="cultural", name="admin_0_countries")
+# Natural Earth
+coast_shp    = shpreader.natural_earth(resolution="110m", category="physical", name="coastline")
+land_shp     = shpreader.natural_earth(resolution="110m", category="physical", name="land")
+country_shp  = shpreader.natural_earth(resolution="110m", category="cultural", name="admin_0_countries")
 
 coast_geoms   = list(shpreader.Reader(coast_shp).geometries())
 land_geoms    = list(shpreader.Reader(land_shp).geometries())
 country_geoms = list(shpreader.Reader(country_shp).geometries())
 
-# 选出有站点的物种
+# species list (only those having sites)
 species_rows = []
 for row in df_temp.itertuples():
     sp_lc = str(row.species).lower()
@@ -354,12 +325,12 @@ n_species = len(species_rows)
 print(f"Will plot {n_species} species.")
 
 
-# ===================== DATA-DRIVEN SIZE LEGEND LABELS =====================
+# ===================== SIZE LEGEND (DATA-DRIVEN) =====================
+
 vals_all = pd.to_numeric(df_sites_all.get(SIZE_COL, pd.Series([], dtype=float)), errors="coerce")
 vals_all = vals_all[np.isfinite(vals_all)]
 
-# Visual marker sizes (scatter s in pt^2)
-size_markers = [50.0, 100.0, 150.0, 200.0]
+size_markers = [50.0, 100.0, 150.0, 200.0]  # scatter s in pt^2
 
 if len(vals_all) > 0:
     q25, q50, q75 = np.quantile(vals_all, [0.25, 0.50, 0.75])
@@ -375,7 +346,7 @@ if len(vals_all) > 0:
         float(np.nanmedian(b3)) if len(b3) else np.nan,
         float(np.nanmedian(b4)) if len(b4) else np.nan,
     ]
-    size_labels = [f"~{v:.1f} {area_unit}" if np.isfinite(v) else "~NA" for v in reps]
+    size_labels = [f"~{v:.1f} {AREA_UNIT}" if np.isfinite(v) else "~NA" for v in reps]
 else:
     q25 = q50 = q75 = np.nan
     size_labels = ["~NA"] * 4
@@ -390,7 +361,6 @@ fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=GRID_FIGSIZE, dpi=DPI
 axes = np.array(axes).reshape(nrows, ncols)
 axes_flat = axes.ravel()
 
-# Base legend items
 legend_handles = [
     mpatches.Patch(color=COAST_BASELINE_COLOR, label="Potential suitability (baseline)"),
     mpatches.Patch(color=COAST_ADDED_COLOR,    label="Incremental potential suitability (with cooling)"),
@@ -399,27 +369,19 @@ legend_handles = [
     Line2D([0], [0], linestyle="--", color=MEAN_ADDED_COLOR, linewidth=1.5,
            label="Mean suitable latitude (with cooling)"),
 ]
-
-# Append size legend using DATA-DRIVEN numeric labels
 for smark, slabel in zip(size_markers, size_labels):
     legend_handles.append(
-        Line2D(
-            [0], [0],
-            marker="o",
-            color="none",
-            markerfacecolor=SITE_FOCAL_FACE,
-            markeredgecolor="black",
-            markersize=float(np.sqrt(smark)),
-            label=slabel
-        )
+        Line2D([0], [0],
+               marker="o", color="none",
+               markerfacecolor=SITE_FOCAL_FACE,
+               markeredgecolor="black",
+               markersize=float(np.sqrt(smark)),
+               label=slabel)
     )
 
-# Zoom caches
 species_segments = {}
 species_points = {}
 species_other_points = {}
-
-# Export table rows
 lat_summary_rows = []
 
 for idx, (row, df_sp) in enumerate(species_rows):
@@ -429,12 +391,13 @@ for idx, (row, df_sp) in enumerate(species_rows):
     Tmin = float(row.Tmin_C)
     Tmax = float(row.Tmax_C)
 
-    # focal sites
     lon_sites_focal = df_sp[LON_COL].values
     lat_sites_focal = df_sp[LAT_COL].values
 
     # other sites (remove overlaps by rounded coords)
     df_other = df_sites_all[df_sites_all["_species_lc"] != sp_lc].copy()
+
+    df_sp = df_sp.copy()
     df_sp["_lon_r"] = df_sp[LON_COL].round(3)
     df_sp["_lat_r"] = df_sp[LAT_COL].round(3)
     df_other["_lon_r"] = df_other[LON_COL].round(3)
@@ -457,8 +420,6 @@ for idx, (row, df_sp) in enumerate(species_rows):
 
     baseline_segments = []
     added_segments = []
-
-    # Collect latitudes of points that form BLUE/RED masks
     lat_base_pts = []
     lat_add_pts  = []
 
@@ -485,22 +446,9 @@ for idx, (row, df_sp) in enumerate(species_rows):
                 lat_name=LAT_NAME
             )
 
-            # Optional override: blue -> red near selected LNG sites
-            override_sites = OVERRIDE_SITES_BY_SPECIES.get(sp_lc, [])
-            if override_sites:
-                for (site_lat, site_lon) in override_sites:
-                    for ip in range(len(xs)):
-                        dx = xs[ip] - site_lon
-                        dy = ys[ip] - site_lat
-                        if (dx*dx + dy*dy) <= (OVERRIDE_RADIUS_DEG * OVERRIDE_RADIUS_DEG):
-                            if base_ok[ip]:
-                                base_ok[ip] = False
-                                added_ok[ip] = True
-
             base_ok_sm  = smooth_mask(base_ok,  max_gap=MAX_GAP_POINTS)
             added_ok_sm = smooth_mask(added_ok, max_gap=MAX_GAP_POINTS)
 
-            # Collect latitudes for mean-latitude lines
             ys_arr = np.asarray(ys, dtype=float)
             lat_base_pts.extend(ys_arr[base_ok_sm].tolist())
             lat_add_pts.extend(ys_arr[added_ok_sm].tolist())
@@ -511,25 +459,22 @@ for idx, (row, df_sp) in enumerate(species_rows):
     baseline_segments = merge_and_filter_segments(baseline_segments, min_len_deg=MIN_SEG_LEN_DEG)
     added_segments    = merge_and_filter_segments(added_segments,    min_len_deg=MIN_SEG_LEN_DEG)
 
-    # Mean suitable latitude derived from BLUE/RED masks
-    bn, bs = hemi_mean_lat(lat_base_pts)   # baseline mean lat
-    an, as_ = hemi_mean_lat(lat_add_pts)   # LNG mean lat
+    bn, bs = hemi_mean_lat(lat_base_pts)
+    an, as_ = hemi_mean_lat(lat_add_pts)
 
-    # Save to table (south as absolute degrees)
     lat_summary_rows.append({
         "species": sp_lc,
         "baseline_north_mean_deg": bn,
         "baseline_south_mean_absdeg": bs,
-        "lng_north_mean_deg": an,
-        "lng_south_mean_absdeg": as_,
+        "cooling_north_mean_deg": an,
+        "cooling_south_mean_absdeg": as_,
         "delta_north_deg": (an - bn) if (bn is not None and an is not None) else np.nan,
         "delta_south_absdeg": (as_ - bs) if (bs is not None and as_ is not None) else np.nan,
     })
 
-    # ----- title -----
     ax.set_title(species.capitalize(), fontsize=14, fontweight="bold", loc="left")
 
-    # ----- land fill -----
+    # land fill
     for g in land_geoms:
         try:
             x, y = g.exterior.xy
@@ -542,15 +487,15 @@ for idx, (row, df_sp) in enumerate(species_rows):
             except Exception:
                 pass
 
-    # ----- countries -----
+    # countries
     for g in country_geoms:
         plot_country_geom(ax, g, color="#c0c0c0", linewidth=0.4, zorder=1.2)
 
-    # ----- background coastline -----
+    # background coastline
     for g in coast_geoms:
         plot_lines_from_geom(ax, g, color=COAST_OTHER_COLOR, linewidth=0.3, zorder=1)
 
-    # ----- baseline (blue) / added (red) -----
+    # baseline/added coast masks
     for seg in baseline_segments:
         x, y = seg.xy
         ax.plot(x, y, color=COAST_BASELINE_COLOR, linewidth=1.5, zorder=2,
@@ -560,7 +505,7 @@ for idx, (row, df_sp) in enumerate(species_rows):
         ax.plot(x, y, color=COAST_ADDED_COLOR, linewidth=1.8, zorder=3,
                 solid_joinstyle="round", solid_capstyle="round")
 
-    # ----- mean latitude dashed lines -----
+    # mean-lat dashed
     if bn is not None and np.isfinite(bn):
         ax.axhline(bn, linestyle="--", color=MEAN_BASELINE_COLOR, linewidth=1.2, zorder=2.6)
     if bs is not None and np.isfinite(bs):
@@ -570,10 +515,10 @@ for idx, (row, df_sp) in enumerate(species_rows):
     if as_ is not None and np.isfinite(as_):
         ax.axhline(-as_, linestyle="--", color=MEAN_ADDED_COLOR, linewidth=1.2, zorder=2.7)
 
-    # ----- scatter points -----
+    # points
     ax.scatter(lon_other, lat_other, s=10, c=SITE_OTHER_COLOR, alpha=0.5, edgecolors="none", zorder=4)
 
-    # focal sizes (use global q25/q50/q75 so legend matches)
+    # focal sizes (bucketed by global quantiles)
     if SIZE_COL in df_sp.columns:
         vals = pd.to_numeric(df_sp[SIZE_COL], errors="coerce").values
         if np.isfinite(vals).any() and np.isfinite(q25) and np.isfinite(q50) and np.isfinite(q75):
@@ -592,39 +537,14 @@ for idx, (row, df_sp) in enumerate(species_rows):
                s=sizes, c=SITE_FOCAL_FACE, edgecolors="black",
                linewidths=0.4, alpha=0.7, zorder=5)
 
-    # ----- per-panel scenario area text (Through / Flux-full / Weak-wall) -----
-    sp_key = sp_lc
-    if sp_key in species_code_map:
-        sp_code = species_code_map[sp_key]
-        if sp_code in area_data:
-            A = area_data[sp_code]
-            text_str = (
-                f"Through: {A['through']:.2f} {area_unit}   "
-                f"Flux-full: {A['flux_full']:.2f} {area_unit}   "
-                f"Weak-wall: {A['weakwall']:.2f} {area_unit}"
-            )
-            ax.text(
-                0.02, 0.02, text_str,
-                transform=ax.transAxes,
-                fontsize=10,
-                color="black",
-                verticalalignment="bottom",
-                horizontalalignment="left",
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.6, pad=3),
-                zorder=30
-            )
-
-    # zoom boxes on main
+    # zoom boxes
     if sp_lc in SPECIES_ZOOM_BBOXES:
         for (box_lon_min, box_lon_max, box_lat_min, box_lat_max) in SPECIES_ZOOM_BBOXES[sp_lc]:
             rect = mpatches.Rectangle(
                 (box_lon_min, box_lat_min),
                 box_lon_max - box_lon_min,
                 box_lat_max - box_lat_min,
-                linewidth=1.5,
-                edgecolor="black",
-                facecolor="none",
-                zorder=10
+                linewidth=1.5, edgecolor="black", facecolor="none", zorder=10
             )
             ax.add_patch(rect)
 
@@ -633,7 +553,7 @@ for idx, (row, df_sp) in enumerate(species_rows):
     ax.set_aspect("equal", adjustable="box")
     ax.tick_params(labelsize=10, length=3)
 
-    # cache for zoom plots
+    # caches for zoom
     species_segments[sp_lc] = (baseline_segments, added_segments)
     species_points[sp_lc] = (lon_sites_focal, lat_sites_focal, sizes)
     species_other_points[sp_lc] = (lon_other, lat_other)
@@ -642,7 +562,7 @@ for idx, (row, df_sp) in enumerate(species_rows):
 for j in range(n_species, nrows * ncols):
     axes_flat[j].set_visible(False)
 
-# labels: left col y, bottom row x
+# axis labels layout
 for r in range(nrows):
     for c in range(ncols):
         ax = axes[r, c]
@@ -669,25 +589,22 @@ fig.legend(handles=legend_handles[2:4], loc="lower center", ncol=2, frameon=Fals
 fig.legend(handles=legend_handles[4:], loc="lower center", ncol=4, frameon=False,
            fontsize=10, bbox_to_anchor=(0.5, -0.01))
 
-out_name_png = "Added_countryline34.png"
-out_name_pdf = "Added_countryline34.pdf"
+out_png = "Figure1_CoastlineSuitability.png"
+out_pdf = "Figure1_CoastlineSuitability.pdf"
 
-# 保存 PNG
-fig.savefig(out_name_png, dpi=DPI, facecolor="white", bbox_inches="tight")
-# 保存 PDF (NEW)
-fig.savefig(out_name_pdf, dpi=DPI, facecolor="white", bbox_inches="tight")
-
+fig.savefig(out_png, dpi=DPI, facecolor="white", bbox_inches="tight")
+fig.savefig(out_pdf, dpi=DPI, facecolor="white", bbox_inches="tight")
 plt.close(fig)
-print(f"✅ Saved grid figure: {out_name_png} and {out_name_pdf}")
+print(f"Saved: {out_png} and {out_pdf}")
 
-# ===================== EXPORT TABLE =====================
+# export table: mean lat from masks
 df_lat = pd.DataFrame(lat_summary_rows).sort_values("species")
 df_lat["delta_north_km"] = df_lat["delta_north_deg"] * 111.0
 df_lat["delta_south_km"] = df_lat["delta_south_absdeg"] * 111.0
 df_lat.to_excel("species_mean_lat_from_lines.xlsx", index=False)
-print("✅ Saved: species_mean_lat_from_lines.xlsx")
+print("Saved: species_mean_lat_from_lines.xlsx")
 
-# ===================== ZOOM FIGURES =====================
+# zoom panels
 for sp_lc, boxes in SPECIES_ZOOM_BBOXES.items():
     if sp_lc not in species_segments:
         continue
@@ -733,7 +650,7 @@ for sp_lc, boxes in SPECIES_ZOOM_BBOXES.items():
             ax_zoom.plot(x, y, color=COAST_ADDED_COLOR, linewidth=20, zorder=3,
                          solid_joinstyle="round", solid_capstyle="round")
 
-        # other points in box
+        # other points
         if lon_other_pts.size > 0:
             mask_other = (lon_other_pts >= box_lon_min) & (lon_other_pts <= box_lon_max) & \
                          (lat_other_pts >= box_lat_min) & (lat_other_pts <= box_lat_max)
@@ -741,7 +658,7 @@ for sp_lc, boxes in SPECIES_ZOOM_BBOXES.items():
                 ax_zoom.scatter(lon_other_pts[mask_other], lat_other_pts[mask_other],
                                 s=10, c=SITE_OTHER_COLOR, alpha=0.6, edgecolors="none", zorder=4)
 
-        # focal points in box
+        # focal points
         if lon_focal.size > 0:
             mask_focal = (lon_focal >= box_lon_min) & (lon_focal <= box_lon_max) & \
                          (lat_focal >= box_lat_min) & (lat_focal <= box_lat_max)
@@ -754,21 +671,17 @@ for sp_lc, boxes in SPECIES_ZOOM_BBOXES.items():
         ax_zoom.set_xlim(box_lon_min, box_lon_max)
         ax_zoom.set_ylim(box_lat_min, box_lat_max)
         ax_zoom.set_aspect("equal", adjustable="box")
-
+        ax_zoom.set_xticks([])
+        ax_zoom.set_yticks([])
         ax_zoom.set_title("")
         ax_zoom.set_xlabel("")
         ax_zoom.set_ylabel("")
-        ax_zoom.set_xticks([])
-        ax_zoom.set_yticks([])
-
         fig_zoom.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
-        out_zoom_base = f"zoom_{sp_lc}_{idx_box+1}"
-        
-        # 保存 PNG
-        fig_zoom.savefig(out_zoom_base + ".png", dpi=DPI, facecolor="white", bbox_inches="tight", pad_inches=0)
-        # 保存 PDF (NEW)
-        fig_zoom.savefig(out_zoom_base + ".pdf", dpi=DPI, facecolor="white", bbox_inches="tight", pad_inches=0)
-        
+        out_zoom_base = f"Figure1_Zoom_{sp_lc}_{idx_box+1}"
+        fig_zoom.savefig(out_zoom_base + ".png", dpi=DPI, facecolor="white",
+                         bbox_inches="tight", pad_inches=0)
+        fig_zoom.savefig(out_zoom_base + ".pdf", dpi=DPI, facecolor="white",
+                         bbox_inches="tight", pad_inches=0)
         plt.close(fig_zoom)
-        print(f"✅ Saved zoom figure: {out_zoom_base}.png/.pdf")
+        print(f"Saved: {out_zoom_base}.png/.pdf")
