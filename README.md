@@ -209,6 +209,7 @@ No proprietary software or closed-source tools were used.
 
 ## 10. License
 
-This repository is provided for academic and research purposes.
+This code is released under the MIT License.
 
-Please cite the associated manuscript if using this code in derivative work.
+You are free to use, modify, and distribute this software under the terms of the MIT License. Please cite the associated manuscript if this code contributes to your research.
+
